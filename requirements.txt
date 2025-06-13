@@ -1,0 +1,7 @@
+streamlit
+beautifulsoup4
+requests
+tqdm
+yaspin
+lxml
+streamlit-components
