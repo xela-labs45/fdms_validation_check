@@ -127,16 +127,16 @@ if uploaded_file:
 # Tabs to show results
 if "results" in st.session_state:
     df = st.session_state["results"]
-    tab_all, tab_found, tab_not_found, tab_errors = st.tabs(["📄 All", "✅ Found", "❌ Not Found", "⚠️ Errors"])
+    tab_all, tab_valid, tab_not_valid, tab_errors = st.tabs(["📄 All", "✅ Valid", "❌ Not Valid", "⚠️ Errors"])
 
     with tab_all:
         st.dataframe(df, use_container_width=True)
 
-    with tab_found:
-        st.dataframe(df[df["Status"] == "Found"], use_container_width=True)
+    with tab_valid:
+        st.dataframe(df[df["Status"] == "Valid"], use_container_width=True)
 
-    with tab_not_found:
-        st.dataframe(df[df["Status"] == "Not Found"][["URL", "Invoice Number", "Validation Error"]], use_container_width=True)
+    with tab_not_valid:
+        st.dataframe(df[df["Status"] == "Not Valid"][["URL", "Invoice Number", "Validation Error"]], use_container_width=True)
 
     with tab_errors:
         st.dataframe(df[df["Status"] == "Error"][["URL", "Invoice Number", "Validation Error"]], use_container_width=True)
