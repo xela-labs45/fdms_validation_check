@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import csv
 import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,7 +14,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2
 MAX_THREADS = 10
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    "User-Agent": "Mozilla/5.0"
 }
 
 # UI Instructions
@@ -23,15 +22,14 @@ st.title("📄 FDMS Link Validator")
 st.markdown("""
 ### 📤 Instructions
 
-Please upload a **CSV file** formatted as follows:
+Upload a **CSV or Excel file** that includes:
+- **'Verification Url'** column → FDMS URL to validate
+- **'Document No.'** column → Invoice Number (used as reference)
 
-- **Column A:** FDMS Links (e.g. `https://fdms.zimra.co.zw/...`)
-- **Column B:** Invoice Numbers (used for reference)
-
-> ⚠️ Ensure the file **has no header row** and each row has **at least two columns**.
+> 📝 File must include headers. Additional columns are fine.
 """)
 
-# Scraping Function
+# Scraping function
 def scrape_url(url, invoice_number):
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
@@ -48,73 +46,85 @@ def scrape_url(url, invoice_number):
                 if found:
                     return {"URL": url, "Invoice Number": invoice_number, "Status": "Found", "Validation Error": ""}
                 else:
-                    # Try to extract the validation error message
                     val_error = soup.select_one(".val-errors-block .col")
                     error_text = val_error.get_text(strip=True) if val_error else "Validation error not found"
                     return {"URL": url, "Invoice Number": invoice_number, "Status": "Not Found", "Validation Error": error_text}
             else:
                 return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": f"HTTP {response.status_code}"}
-        except Exception as e:
+        except Exception:
             time.sleep(RETRY_DELAY)
 
     return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": "Max retries exceeded"}
 
-# CSV Upload and Processing
-uploaded_file = st.file_uploader("Upload CSV file with FDMS URLs", type=["csv"])
+# File uploader
+uploaded_file = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx"])
 
 if uploaded_file:
-    # Read and validate CSV
-    rows = list(csv.reader(uploaded_file.read().decode("utf-8").splitlines()))
-    valid_rows = []
-    skipped_rows = 0
-
-    for row in rows:
-        if len(row) >= 2 and row[0].strip() and row[1].strip():
-            valid_rows.append((row[0].strip(), row[1].strip()))
+    try:
+        # Detect and read file type
+        if uploaded_file.name.endswith(".csv"):
+            df_input = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith(".xlsx"):
+            df_input = pd.read_excel(uploaded_file)
         else:
-            skipped_rows += 1
+            st.error("Unsupported file type.")
+            df_input = None
 
-    if not valid_rows:
-        st.error("❌ No valid rows found in the uploaded file. Please check formatting.")
-    else:
-        st.success(f"✅ {len(valid_rows)} valid rows loaded. {skipped_rows} rows skipped.")
+        if df_input is not None:
+            # Validate required columns
+            required_cols = ["Verification Url", "Document No."]
+            if not all(col in df_input.columns for col in required_cols):
+                st.error(f"❌ Missing required columns. Please ensure your file includes: {', '.join(required_cols)}")
+            else:
+                df_filtered = df_input[required_cols].dropna()
+                valid_rows = list(df_filtered.itertuples(index=False, name=None))
 
-        if st.button("Start Validation 🚀"):
-            with st.spinner("Validation in progress... This may take a moment..."):
-                results = []
-                total = len(valid_rows)
-                progress_bar = st.progress(0, text="Starting...")
-                status_placeholder = st.empty()
-        
-                completed = 0
-                start_time = time.time()
-        
-                with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-                    future_to_row = {executor.submit(scrape_url, url, inv): (url, inv) for url, inv in valid_rows}
-                    for future in as_completed(future_to_row):
-                        result = future.result()
-                        results.append(result)
-                        completed += 1
-        
-                        # Time estimates
-                        elapsed = time.time() - start_time
-                        avg_time_per_item = elapsed / completed
-                        remaining = int(avg_time_per_item * (total - completed))
-                        mins, secs = divmod(remaining, 60)
-                        percent_complete = int(completed / total * 100)
-        
-                        # Update progress bar and message
-                        progress_bar.progress(completed / total, text=f"Validation... {percent_complete}%")
-                        status_placeholder.markdown(f"⏱️ Estimated time remaining: **{mins}m {secs}s**")
-        
-                progress_bar.empty()
-                status_placeholder.empty()
-        
-            df = pd.DataFrame(results)
-            st.session_state["results"] = df
-            st.success("✅ Validation completed!")
+                if not valid_rows:
+                    st.warning("⚠️ No valid rows to process after filtering missing values.")
+                else:
+                    st.success(f"✅ {len(valid_rows)} valid rows loaded from file.")
 
-# Results Filtering with Tabs
+                    if st.button("Start Validation 🚀"):
+                        with st.spinner("Validation in progress... This may take a moment..."):
+                            results = []
+                            total = len(valid_rows)
+                            progress_bar = st.progress(0, text="Starting...")
+                            status_placeholder = st.empty()
+
+                            completed = 0
+                            start_time = time.time()
+
+                            with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+                                future_to_row = {
+                                    executor.submit(scrape_url, url, inv): (url, inv)
+                                    for url, inv in valid_rows
+                                }
+                                for future in as_completed(future_to_row):
+                                    result = future.result()
+                                    results.append(result)
+                                    completed += 1
+
+                                    # Estimate time
+                                    elapsed = time.time() - start_time
+                                    avg_time = elapsed / completed
+                                    remaining = int(avg_time * (total - completed))
+                                    mins, secs = divmod(remaining, 60)
+                                    percent = int((completed / total) * 100)
+
+                                    progress_bar.progress(completed / total, text=f"Validation... {percent}%")
+                                    status_placeholder.markdown(f"⏱️ Estimated time remaining: **{mins}m {secs}s**")
+
+                            progress_bar.empty()
+                            status_placeholder.empty()
+
+                        df_result = pd.DataFrame(results)
+                        st.session_state["results"] = df_result
+                        st.success("✅ Validation completed!")
+
+    except Exception as e:
+        st.error(f"❌ Error reading file: {str(e)}")
+
+# Tabs to show results
 if "results" in st.session_state:
     df = st.session_state["results"]
     tab_all, tab_found, tab_not_found, tab_errors = st.tabs(["📄 All", "✅ Found", "❌ Not Found", "⚠️ Errors"])
