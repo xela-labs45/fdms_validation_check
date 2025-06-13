@@ -1,100 +1,112 @@
 import streamlit as st
 import pandas as pd
-import csv
 import requests
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
-st.set_page_config(page_title="FDMS Scraper", layout="wide")
-
 # Constants
-SEARCH_TEXTS = ["Invoice is valid", "Credit note is valid"]
-MAX_RETRIES = 3
-RETRY_DELAY = 2
 MAX_THREADS = 10
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
+SEARCH_TEXTS = ["Invoice is valid", "Credit note is valid"]
+VALIDATION_ERROR_CLASS = "val-errors-block"
 
-# UI Instructions
-st.title("📄 FDMS Link Validator")
-st.markdown("""
-### 📤 Instructions
-
-Please upload a **CSV file** formatted as follows:
-
-- **Column A:** FDMS Links (e.g. `https://fdms.zimra.co.zw/...`)
-- **Column B:** Invoice Numbers (used for reference)
-
-> ⚠️ Ensure the file **has no header row** and each row has **at least two columns**.
-""")
-
-# Scraping Function
 def scrape_url(url, invoice_number):
-    parsed = urlparse(url)
-    if not parsed.scheme or not parsed.netloc:
-        return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": "Invalid URL"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    result = {
+        "URL": url,
+        "Invoice Number": invoice_number,
+        "Status": "Error",
+        "Validation Error": ""
+    }
 
-    for _ in range(MAX_RETRIES):
-        try:
-            response = requests.get(url, timeout=10, headers=HEADERS)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "lxml")
-                text = soup.get_text()
-                found = any(msg in text for msg in SEARCH_TEXTS)
+    try:
+        response = requests.get(url, timeout=10, headers=headers, allow_redirects=True)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'lxml')
+            page_text = soup.get_text()
 
-                if found:
-                    return {"URL": url, "Invoice Number": invoice_number, "Status": "Found", "Validation Error": ""}
-                else:
-                    # Try to extract the validation error message
-                    val_error = soup.select_one(".val-errors-block .col")
-                    error_text = val_error.get_text(strip=True) if val_error else "Validation error not found"
-                    return {"URL": url, "Invoice Number": invoice_number, "Status": "Not Found", "Validation Error": error_text}
+            if any(text in page_text for text in SEARCH_TEXTS):
+                result["Status"] = "Found"
             else:
-                return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": f"HTTP {response.status_code}"}
-        except Exception as e:
-            time.sleep(RETRY_DELAY)
+                result["Status"] = "Not Found"
+                error_block = soup.find("div", class_=VALIDATION_ERROR_CLASS)
+                if error_block:
+                    result["Validation Error"] = error_block.get_text(strip=True)
+        else:
+            result["Status"] = f"Error: HTTP {response.status_code}"
+    except requests.RequestException as e:
+        result["Status"] = f"Error: {str(e)}"
 
-    return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": "Max retries exceeded"}
+    return result
 
-# CSV Upload and Processing
-uploaded_file = st.file_uploader("Upload CSV file with FDMS URLs", type=["csv"])
+# Streamlit UI
+st.set_page_config(page_title="FDMS Scraper", layout="wide")
+st.title("📄 FDMS Invoice Validation Scraper")
+
+# Instructions
+with st.expander("📌 CSV Format Instructions"):
+    st.markdown("""
+    - **Column A**: FDMS validation **Links**
+    - **Column B**: Corresponding **Invoice Numbers**
+    - Ensure the file has **no headers**
+    """)
+
+uploaded_file = st.file_uploader("Upload your CSV", type="csv")
 
 if uploaded_file:
-    # Read and validate CSV
-    rows = list(csv.reader(uploaded_file.read().decode("utf-8").splitlines()))
-    valid_rows = []
-    skipped_rows = 0
+    df_input = pd.read_csv(uploaded_file, header=None)
 
-    for row in rows:
-        if len(row) >= 2 and row[0].strip() and row[1].strip():
-            valid_rows.append((row[0].strip(), row[1].strip()))
-        else:
-            skipped_rows += 1
-
-    if not valid_rows:
-        st.error("❌ No valid rows found in the uploaded file. Please check formatting.")
+    if df_input.shape[1] < 2:
+        st.error("❗️ CSV must contain at least two columns: Link (A) and Invoice Number (B).")
     else:
-        st.success(f"✅ {len(valid_rows)} valid rows loaded. {skipped_rows} rows skipped.")
+        df_input.columns = ["URL", "Invoice Number"]
+        valid_rows = [
+            (row["URL"], row["Invoice Number"])
+            for _, row in df_input.iterrows()
+            if pd.notna(row["URL"]) and pd.notna(row["Invoice Number"])
+        ]
 
-        if st.button("Start Scraping 🚀"):
-            with st.spinner("Scraping in progress... This may take a moment..."):
-                results = []
-                with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-                    future_to_row = {executor.submit(scrape_url, url, inv): (url, inv) for url, inv in valid_rows}
-                    for future in as_completed(future_to_row):
-                        results.append(future.result())
+        if not valid_rows:
+            st.warning("⚠️ No valid rows found in the uploaded file.")
+        else:
+            if st.button("Start Scraping 🚀"):
+                with st.spinner("Scraping in progress... This may take a moment..."):
+                    results = []
+                    total = len(valid_rows)
+                    progress_bar = st.progress(0, text="Starting...")
+                    status_placeholder = st.empty()
 
-            df = pd.DataFrame(results)
-            st.session_state["results"] = df
-            st.success("✅ Scraping completed!")
+                    completed = 0
+                    start_time = time.time()
 
-# Results Filtering with Tabs
+                    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+                        future_to_row = {executor.submit(scrape_url, url, inv): (url, inv) for url, inv in valid_rows}
+                        for future in as_completed(future_to_row):
+                            result = future.result()
+                            results.append(result)
+                            completed += 1
+
+                            elapsed = time.time() - start_time
+                            avg_time = elapsed / completed
+                            remaining = int(avg_time * (total - completed))
+                            mins, secs = divmod(remaining, 60)
+                            percent = int(completed / total * 100)
+
+                            progress_bar.progress(completed / total, text=f"Scraping... {percent}%")
+                            status_placeholder.markdown(f"⏱️ Estimated time remaining: **{mins}m {secs}s**")
+
+                    progress_bar.empty()
+                    status_placeholder.empty()
+
+                df = pd.DataFrame(results)
+                st.session_state["results"] = df
+                st.success("✅ Scraping completed!")
+
+# Show Results in Tabs
 if "results" in st.session_state:
     df = st.session_state["results"]
-    tab_all, tab_found, tab_not_found, tab_errors = st.tabs(["📄 All", "✅ Found", "❌ Not Found", "⚠️ Errors"])
+    tab_all, tab_found, tab_not_found, tab_errors = st.tabs(["📋 All", "✅ Found", "❌ Not Found", "⚠️ Errors"])
 
     with tab_all:
         st.dataframe(df, use_container_width=True)
@@ -103,9 +115,7 @@ if "results" in st.session_state:
         st.dataframe(df[df["Status"] == "Found"], use_container_width=True)
 
     with tab_not_found:
-        st.dataframe(df[df["Status"] == "Not Found"][["URL", "Invoice Number", "Validation Error"]], use_container_width=True)
+        st.dataframe(df[df["Status"] == "Not Found"], use_container_width=True)
 
     with tab_errors:
-        st.dataframe(df[df["Status"] == "Error"][["URL", "Invoice Number", "Validation Error"]], use_container_width=True)
-
-    st.download_button("📥 Download Results as CSV", data=df.to_csv(index=False).encode("utf-8"), file_name="fdms_results.csv", mime="text/csv")
+        st.dataframe(df[df["Status"].str.contains("Error")], use_container_width=True)
