@@ -4,4 +4,3 @@ requests
 tqdm
 yaspin
 lxml
-streamlit-components
