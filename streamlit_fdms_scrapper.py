@@ -44,11 +44,11 @@ def scrape_url(url, invoice_number):
                 found = any(msg in text for msg in SEARCH_TEXTS)
 
                 if found:
-                    return {"URL": url, "Invoice Number": invoice_number, "Status": "Found", "Validation Error": ""}
+                    return {"URL": url, "Invoice Number": invoice_number, "Status": "Valid", "Validation Error": ""}
                 else:
                     val_error = soup.select_one(".val-errors-block .col")
                     error_text = val_error.get_text(strip=True) if val_error else "Validation error not found"
-                    return {"URL": url, "Invoice Number": invoice_number, "Status": "Not Found", "Validation Error": error_text}
+                    return {"URL": url, "Invoice Number": invoice_number, "Status": "Not Valid", "Validation Error": error_text}
             else:
                 return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": f"HTTP {response.status_code}"}
         except Exception:
