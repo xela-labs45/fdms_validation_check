@@ -13,8 +13,13 @@ SEARCH_TEXTS = ["Invoice is valid", "Credit note is valid"]
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 MAX_THREADS = 10
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
+}
+REQUIRED_COLUMNS = {
+    "verification url": "Verification Url",
+    "document no.": "Document No.",
 }
 
 # UI Instructions
@@ -29,32 +34,74 @@ Upload a **CSV or Excel file** that includes:
 > 📝 File must include headers. Additional columns are fine.
 """)
 
-# Scraping function
-def scrape_url(url, invoice_number):
-    parsed = urlparse(url)
-    if not parsed.scheme or not parsed.netloc:
-        return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": "Invalid URL"}
+def normalize_column_name(column_name):
+    return " ".join(str(column_name).strip().lower().split())
 
-    for _ in range(MAX_RETRIES):
+
+def normalize_input_columns(df):
+    normalized_to_actual = {normalize_column_name(col): col for col in df.columns}
+    missing = [display_name for normalized_name, display_name in REQUIRED_COLUMNS.items() if normalized_name not in normalized_to_actual]
+
+    if missing:
+        return None, missing
+
+    selected_columns = {
+        normalized_to_actual[normalized_name]: display_name
+        for normalized_name, display_name in REQUIRED_COLUMNS.items()
+    }
+    return df[list(selected_columns.keys())].rename(columns=selected_columns), []
+
+
+def result_row(url, invoice_number, status, validation_error, row_number):
+    return {
+        "Row Number": row_number,
+        "URL": url,
+        "Invoice Number": invoice_number,
+        "Status": status,
+        "Validation Error": validation_error,
+    }
+
+
+# Scraping function
+def scrape_url(url, invoice_number, row_number):
+    url = "" if pd.isna(url) else str(url).strip()
+    invoice_number = "" if pd.isna(invoice_number) else str(invoice_number).strip()
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return result_row(url, invoice_number, "Error", "Invalid URL", row_number)
+
+    last_error = "Max retries exceeded"
+
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = requests.get(url, timeout=10, headers=HEADERS)
+
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "lxml")
                 text = soup.get_text()
                 found = any(msg in text for msg in SEARCH_TEXTS)
 
                 if found:
-                    return {"URL": url, "Invoice Number": invoice_number, "Status": "Valid", "Validation Error": ""}
-                else:
-                    val_error = soup.select_one(".val-errors-block .col")
-                    error_text = val_error.get_text(strip=True) if val_error else "Validation error not found"
-                    return {"URL": url, "Invoice Number": invoice_number, "Status": "Not Valid", "Validation Error": error_text}
-            else:
-                return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": f"HTTP {response.status_code}"}
-        except Exception:
+                    return result_row(url, invoice_number, "Valid", "", row_number)
+
+                val_error = soup.select_one(".val-errors-block .col")
+                error_text = val_error.get_text(strip=True) if val_error else "Validation error not found"
+                return result_row(url, invoice_number, "Not Valid", error_text, row_number)
+
+            last_error = f"HTTP {response.status_code}"
+            if response.status_code not in RETRYABLE_STATUS_CODES:
+                return result_row(url, invoice_number, "Error", last_error, row_number)
+        except requests.RequestException as exc:
+            last_error = f"Request failed: {exc}"
+        except Exception as exc:
+            last_error = f"Validation failed: {exc}"
+            return result_row(url, invoice_number, "Error", last_error, row_number)
+
+        if attempt < MAX_RETRIES:
             time.sleep(RETRY_DELAY)
 
-    return {"URL": url, "Invoice Number": invoice_number, "Status": "Error", "Validation Error": "Max retries exceeded"}
+    return result_row(url, invoice_number, "Error", last_error, row_number)
 
 # File uploader
 uploaded_file = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx"])
@@ -72,12 +119,15 @@ if uploaded_file:
 
         if df_input is not None:
             # Validate required columns
-            required_cols = ["Verification Url", "Document No."]
-            if not all(col in df_input.columns for col in required_cols):
-                st.error(f"❌ Missing required columns. Please ensure your file includes: {', '.join(required_cols)}")
+            df_required, missing_cols = normalize_input_columns(df_input)
+            if missing_cols:
+                st.error(f"❌ Missing required columns. Please ensure your file includes: {', '.join(missing_cols)}")
             else:
-                df_filtered = df_input[required_cols].dropna()
-                valid_rows = list(df_filtered.itertuples(index=False, name=None))
+                df_filtered = df_required.dropna().copy()
+                valid_rows = [
+                    (row_number, row["Verification Url"], row["Document No."])
+                    for row_number, row in df_filtered.iterrows()
+                ]
 
                 if not valid_rows:
                     st.warning("⚠️ No valid rows to process after filtering missing values.")
@@ -96,11 +146,16 @@ if uploaded_file:
 
                             with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
                                 future_to_row = {
-                                    executor.submit(scrape_url, url, inv): (url, inv)
-                                    for url, inv in valid_rows
+                                    executor.submit(scrape_url, url, inv, row_number): (url, inv, row_number)
+                                    for row_number, url, inv in valid_rows
                                 }
                                 for future in as_completed(future_to_row):
-                                    result = future.result()
+                                    url, inv, row_number = future_to_row[future]
+                                    try:
+                                        result = future.result()
+                                    except Exception as exc:
+                                        result = result_row(url, inv, "Error", f"Unexpected validation error: {exc}", row_number)
+
                                     results.append(result)
                                     completed += 1
 
@@ -117,7 +172,7 @@ if uploaded_file:
                             progress_bar.empty()
                             status_placeholder.empty()
 
-                        df_result = pd.DataFrame(results)
+                        df_result = pd.DataFrame(results).sort_values("Row Number").drop(columns=["Row Number"])
                         st.session_state["results"] = df_result
                         st.success("✅ Validation completed!")
 
