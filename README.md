@@ -1,75 +1,67 @@
 # FDMS Validation Check
 
-A Streamlit web app for validating FDMS verification links in bulk from a CSV or Excel file.
+FDMS Validation Check is a simple Streamlit app for checking many FDMS verification links at once.
 
-The app reads invoice verification URLs, visits each link, checks whether the FDMS validation page reports the invoice or credit note as valid, and returns a downloadable CSV with the validation result for every document.
+Upload a CSV or Excel file with your FDMS verification URLs, start the validation, and download a results file showing which documents are valid, not valid, or could not be checked.
 
-## Features
+## What It Does
 
-- Upload CSV or Excel files directly in the browser
-- Validate multiple FDMS links concurrently
-- Match successful validation messages for invoices and credit notes
-- Capture validation error text when a document is not valid
-- Separate result views for all records, valid records, invalid records, and request errors
-- Download validation results as a CSV file
+- Accepts `.csv` and `.xlsx` files
+- Checks invoice and credit note verification links in bulk
+- Shows progress while validation is running
+- Keeps the results in the same order as the uploaded file
+- Separates results into `All`, `Valid`, `Not Valid`, and `Errors` tabs
+- Shows available FDMS validation error text for failed documents
+- Retries temporary connection and server issues before marking a link as an error
+- Exports the full validation result as `fdms_results.csv`
 
-## Input File Format
+## File Format
 
-Your input file must include headers and the following columns:
-
-| Column | Description |
-| --- | --- |
-| `Verification Url` | The FDMS verification URL to validate |
-| `Document No.` | The invoice or credit note number used as the reference |
-
-Additional columns are allowed, but only these two columns are used by the app.
-
-Rows with missing values in either required column are skipped.
-
-## Output
-
-The app generates a results table with:
+Your upload must include these columns:
 
 | Column | Description |
 | --- | --- |
-| `URL` | The FDMS URL that was checked |
+| `Verification Url` | The FDMS verification link to check |
+| `Document No.` | The invoice or credit note number |
+
+Column names are matched without caring about extra spaces or letter case. For example, `verification url`, `Verification Url`, and ` Verification Url ` are treated as the same column.
+
+Extra columns are allowed. Rows with a missing verification URL or document number are skipped.
+
+## Result Columns
+
+The downloaded results include:
+
+| Column | Description |
+| --- | --- |
+| `URL` | The FDMS link that was checked |
 | `Invoice Number` | The document number from the uploaded file |
 | `Status` | `Valid`, `Not Valid`, or `Error` |
-| `Validation Error` | Error details from the FDMS page or request failure |
+| `Validation Error` | FDMS validation message or request error details |
 
-You can download the full result set as `fdms_results.csv`.
+## Status Meanings
 
-## How Validation Works
+| Status | Meaning |
+| --- | --- |
+| `Valid` | The FDMS page says the invoice or credit note is valid |
+| `Not Valid` | The FDMS page loaded, but it did not show a valid message |
+| `Error` | The URL was invalid, unavailable, returned an HTTP error, or could not be checked after retries |
 
-For each uploaded URL, the app:
+The app checks for these FDMS success messages:
 
-1. Checks that the URL is structurally valid.
-2. Sends an HTTP request to the verification page.
-3. Parses the returned HTML.
-4. Marks the document as `Valid` if the page contains either:
-   - `Invoice is valid`
-   - `Credit note is valid`
-5. Marks the document as `Not Valid` if the page loads but no valid message is found.
-6. Extracts the validation error from `.val-errors-block .col` when available.
-7. Marks the document as `Error` for invalid URLs, failed requests, non-200 HTTP responses, or repeated retry failures.
-
-## Requirements
-
-- Python 3.9 or newer recommended
-- pip
-
-Python dependencies are listed in [requirements.txt](requirements.txt).
+- `Invoice is valid`
+- `Credit note is valid`
 
 ## Installation
 
 Clone the repository:
 
 ```bash
-git clone https://github.com/your-username/fdms_validation_check.git
+git clone https://github.com/xela-labs45/fdms_validation_check.git
 cd fdms_validation_check
 ```
 
-Create and activate a virtual environment:
+Create a virtual environment:
 
 ```bash
 python -m venv .venv
@@ -83,73 +75,45 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-Install dependencies:
+Install the required packages:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Usage
+## Running the App
 
-Start the Streamlit app:
+Start Streamlit:
 
 ```bash
 streamlit run streamlit_fdms_scrapper.py
 ```
 
-Then open the local URL shown by Streamlit, usually:
+Open the local Streamlit link shown in the terminal. It is usually:
 
 ```text
 http://localhost:8501
 ```
 
-In the app:
+## Using the App
 
-1. Upload a `.csv` or `.xlsx` file.
-2. Confirm that valid rows were loaded.
+1. Upload a CSV or Excel file.
+2. Check that the app loaded the expected number of valid rows.
 3. Click `Start Validation`.
 4. Review the result tabs.
 5. Download the results CSV.
 
-## Configuration
+## Reliability Notes
 
-The main runtime settings are defined near the top of [streamlit_fdms_scrapper.py](streamlit_fdms_scrapper.py):
+The app retries temporary request failures and common temporary HTTP responses such as `429`, `500`, `502`, `503`, and `504`.
 
-| Setting | Default | Description |
-| --- | ---: | --- |
-| `MAX_RETRIES` | `3` | Number of attempts before marking a request as failed |
-| `RETRY_DELAY` | `2` | Seconds to wait between failed request attempts |
-| `MAX_THREADS` | `10` | Maximum number of concurrent validation requests |
-| `SEARCH_TEXTS` | `["Invoice is valid", "Credit note is valid"]` | Page text used to identify valid documents |
+If a link still cannot be checked, the result is marked as `Error` with the available error detail. The app does not stop the whole validation run because of a single bad URL or failed request.
 
-Adjust these values if you need slower or faster validation behavior.
+Validation depends on the text and page structure returned by the FDMS verification site. If the FDMS page wording or layout changes, the matching rules may need to be updated.
 
-## Notes and Limitations
+## Requirements
 
-- The app depends on the structure and text returned by the FDMS verification pages.
-- Very large uploads may take time depending on network speed and FDMS response times.
-- The app retries request failures, but persistent network issues or unavailable URLs are reported as errors.
-- This project does not permanently store uploaded files or validation results; results live in the Streamlit session until the page is refreshed or the app restarts.
+- Python 3.9 or newer recommended
+- pip
 
-## Project Structure
-
-```text
-.
-|-- README.md
-|-- requirements.txt
-`-- streamlit_fdms_scrapper.py
-```
-
-## Contributing
-
-Contributions are welcome. Useful improvements could include:
-
-- Better request error reporting
-- Support for more input column names
-- Exporting Excel results
-- Automated tests for the URL validation logic
-- Deployment instructions for Streamlit Community Cloud or another host
-
-## License
-
-No license file is currently included. Add a `LICENSE` file before publishing if you want others to use, modify, or redistribute the project under explicit open source terms.
+Dependencies are listed in [requirements.txt](requirements.txt).
